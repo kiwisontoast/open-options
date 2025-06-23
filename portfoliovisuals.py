@@ -136,6 +136,112 @@ def load_cash_balance():
         return 0.0
 
 
+def get_shares_in_contracts():
+    """
+    Calculate how many shares of each stock are tied up in covered call contracts.
+
+    Returns:
+        dict: Dictionary with ticker as key and number of shares in contracts as value
+    """
+    shares_in_contracts = {}
+
+    for call_data in covered_calls.values():
+        ticker = call_data["ticker"]
+        if ticker in shares_in_contracts:
+            shares_in_contracts[ticker] += 100
+        else:
+            shares_in_contracts[ticker] = 100
+
+    return shares_in_contracts
+
+
+def get_available_shares(ticker):
+    """
+    Get the number of shares available for trading (not tied up in contracts).
+
+    Args:
+        ticker (str): Stock ticker symbol
+
+    Returns:
+        float: Number of shares available for trading
+    """
+    if ticker not in portfolio:
+        return 0
+
+    total_shares = portfolio[ticker]["shares"]
+    shares_in_contracts = get_shares_in_contracts()
+    contracted_shares = shares_in_contracts.get(ticker, 0)
+
+    return max(0, total_shares - contracted_shares)
+
+
+def check_expired_options():
+    """
+    Check for expired options and handle them automatically.
+    Called when the program starts.
+    """
+    current_time = datetime.now()
+    expiration_time = current_time.replace(
+        hour=15, minute=0, second=0, microsecond=0
+    )  # 3 PM
+
+    expired_calls = []
+
+    for call_id, call_data in list(covered_calls.items()):
+        try:
+            exp_date = datetime.strptime(call_data["exp_date"], "%Y-%m-%d")
+            exp_datetime = exp_date.replace(hour=15, minute=0, second=0, microsecond=0)
+
+            # Check if option has expired (past 3 PM on expiration date)
+            if current_time >= exp_datetime:
+                ticker = call_data["ticker"]
+                strike_price = call_data["strike_price"]
+
+                # Get current stock price
+                current_price = get_current_stock_price(ticker)
+
+                # Check if option is in the money (current price >= strike + 0.01)
+                if current_price >= strike_price + 0.01:
+                    # Option is exercised - stock is called away
+                    if ticker in portfolio and portfolio[ticker]["shares"] >= 100:
+                        # Remove 100 shares from portfolio
+                        portfolio[ticker]["shares"] -= 100
+                        if portfolio[ticker]["shares"] <= 0:
+                            del portfolio[ticker]
+
+                        # Add strike price * 100 to cash (from stock sale)
+                        global cash_balance
+                        cash_balance += strike_price * 100
+
+                        expired_calls.append(
+                            f"{ticker} EXERCISED: Stock called away at ${strike_price:.2f}, +${strike_price * 100:.2f} cash"
+                        )
+                    else:
+                        expired_calls.append(
+                            f"{ticker} ERROR: Not enough shares for exercise"
+                        )
+                else:
+                    # Option expired worthless
+                    expired_calls.append(f"{ticker} EXPIRED: Option expired worthless")
+
+                # Remove the expired option
+                del covered_calls[call_id]
+
+        except ValueError:
+            # Invalid date format, remove the option
+            expired_calls.append(f"Invalid option removed: {call_data}")
+            del covered_calls[call_id]
+
+    if expired_calls:
+        save_covered_calls_data(covered_calls)
+        save_portfolio_data(portfolio)
+        save_cash_balance(cash_balance)
+
+        # Show summary of what happened
+        message = "Options processed:\n\n" + "\n".join(expired_calls)
+        messagebox.showinfo("Options Expiry Processing", message)
+
+
 def get_current_stock_price(ticker):
     """
     Get current stock price for a ticker.
@@ -158,10 +264,11 @@ def calculate_portfolio_value():
     Calculate total portfolio value including stocks, cash, and covered calls.
 
     Returns:
-        tuple: (total_value, stock_value, cash_value, options_value, portfolio_breakdown)
+        tuple: (total_value, stock_value, cash_value, options_value, portfolio_breakdown, shares_in_contracts)
     """
     stock_value = 0
     portfolio_breakdown = {}
+    shares_in_contracts = get_shares_in_contracts()
 
     for ticker, data in portfolio.items():
         current_price = get_current_stock_price(ticker)
@@ -173,11 +280,19 @@ def calculate_portfolio_value():
             (gain_loss / (shares * purchase_price)) * 100 if purchase_price > 0 else 0
         )
 
+        # Calculate available vs contracted shares
+        available_shares = get_available_shares(ticker)
+        contracted_shares = shares_in_contracts.get(ticker, 0)
+
         portfolio_breakdown[ticker] = {
             "shares": shares,
+            "available_shares": available_shares,
+            "contracted_shares": contracted_shares,
             "purchase_price": purchase_price,
             "current_price": current_price,
             "current_value": current_value,
+            "available_value": available_shares * current_price,
+            "contracted_value": contracted_shares * current_price,
             "gain_loss": gain_loss,
             "gain_loss_percent": gain_loss_percent,
             "purchase_date": data["purchase_date"],
@@ -193,20 +308,43 @@ def calculate_portfolio_value():
 
     total_value = stock_value + cash_balance + options_value
 
-    return total_value, stock_value, cash_balance, options_value, portfolio_breakdown
+    return (
+        total_value,
+        stock_value,
+        cash_balance,
+        options_value,
+        portfolio_breakdown,
+        shares_in_contracts,
+    )
 
 
 def update_portfolio_display():
     """
     Update the portfolio display with current values and statistics.
     """
-    total_value, stock_value, cash_value, options_value, breakdown = (
-        calculate_portfolio_value()
+    (
+        total_value,
+        stock_value,
+        cash_value,
+        options_value,
+        breakdown,
+        shares_in_contracts,
+    ) = calculate_portfolio_value()
+
+    # Calculate available vs contracted values
+    available_stock_value = sum(data["available_value"] for data in breakdown.values())
+    contracted_stock_value = sum(
+        data["contracted_value"] for data in breakdown.values()
     )
 
     # Update total values
     total_value_label.config(text=f"Total Portfolio Value: ${total_value:.2f}")
-    stock_value_label.config(text=f"Stock Value: ${stock_value:.2f}")
+    stock_value_label.config(
+        text=f"Stock Value (Available): ${available_stock_value:.2f}"
+    )
+    contracted_value_label.config(
+        text=f"Stock Value (In Contracts): ${contracted_stock_value:.2f}"
+    )
     cash_value_label.config(text=f"Cash: ${cash_value:.2f}")
     options_value_label.config(text=f"Options Value: ${options_value:.2f}")
 
@@ -219,11 +357,19 @@ def update_portfolio_display():
             else f"-${abs(data['gain_loss']):.2f}"
         )
         percent_text = f"({data['gain_loss_percent']:+.2f}%)"
-        portfolio_listbox.insert(
-            tk.END,
-            f"{ticker}: {data['shares']:.0f} shares @ ${data['current_price']:.2f} | "
-            f"Value: ${data['current_value']:.2f} | {gain_loss_text} {percent_text}",
-        )
+
+        if data["contracted_shares"] > 0:
+            portfolio_listbox.insert(
+                tk.END,
+                f"{ticker}: {data['available_shares']:.0f} available + {data['contracted_shares']:.0f} contracted "
+                f"@ ${data['current_price']:.2f} | Total: ${data['current_value']:.2f} | {gain_loss_text} {percent_text}",
+            )
+        else:
+            portfolio_listbox.insert(
+                tk.END,
+                f"{ticker}: {data['shares']:.0f} shares @ ${data['current_price']:.2f} | "
+                f"Value: ${data['current_value']:.2f} | {gain_loss_text} {percent_text}",
+            )
 
     # Update covered calls listbox
     covered_calls_listbox.delete(0, tk.END)
@@ -323,6 +469,7 @@ def add_stock_to_portfolio():
 def remove_stock_from_portfolio():
     """
     Remove shares from the portfolio and add proceeds to cash.
+    Only allows selling available shares (not in contracts).
     """
     try:
         ticker = ticker_entry.get().upper()
@@ -332,10 +479,16 @@ def remove_stock_from_portfolio():
             messagebox.showerror("Error", f"{ticker} not found in portfolio")
             return
 
-        if shares_to_remove > portfolio[ticker]["shares"]:
+        # Check available shares (not in contracts)
+        available_shares = get_available_shares(ticker)
+        if shares_to_remove > available_shares:
+            contracted_shares = get_shares_in_contracts().get(ticker, 0)
             messagebox.showerror(
                 "Error",
-                f"You only have {portfolio[ticker]['shares']} shares of {ticker}",
+                f"You have {portfolio[ticker]['shares']:.0f} total shares of {ticker}\n"
+                f"Available for sale: {available_shares:.0f} shares\n"
+                f"In contracts: {contracted_shares:.0f} shares\n"
+                f"Cannot sell {shares_to_remove:.0f} shares",
             )
             return
 
@@ -390,10 +543,17 @@ def add_covered_call():
             messagebox.showerror("Error", "Please enter valid values")
             return
 
-        # Check if we have at least 100 shares
-        if ticker not in portfolio or portfolio[ticker]["shares"] < 100:
+        # Check if we have at least 100 available shares (not in contracts)
+        available_shares = get_available_shares(ticker)
+        if available_shares < 100:
+            total_shares = portfolio.get(ticker, {}).get("shares", 0)
+            contracted_shares = get_shares_in_contracts().get(ticker, 0)
             messagebox.showerror(
-                "Error", f"Need at least 100 shares of {ticker} for covered call"
+                "Error",
+                f"Need at least 100 available shares of {ticker} for covered call\n"
+                f"Total shares: {total_shares:.0f}\n"
+                f"Available: {available_shares:.0f}\n"
+                f"In contracts: {contracted_shares:.0f}",
             )
             return
 
@@ -436,6 +596,51 @@ def add_covered_call():
 
     except ValueError:
         messagebox.showerror("Error", "Please enter valid numeric values")
+
+
+def manual_call_away():
+    """
+    Manually call away stock for a selected covered call.
+    """
+    selection = covered_calls_listbox.curselection()
+    if not selection:
+        messagebox.showerror("Error", "Please select a covered call to exercise")
+        return
+
+    index = selection[0]
+    call_id = list(covered_calls.keys())[index]
+    call_data = covered_calls[call_id]
+
+    ticker = call_data["ticker"]
+    strike_price = call_data["strike_price"]
+
+    # Check if we have the shares
+    if ticker not in portfolio or portfolio[ticker]["shares"] < 100:
+        messagebox.showerror("Error", f"Not enough shares of {ticker} in portfolio")
+        return
+
+    # Remove 100 shares from portfolio
+    portfolio[ticker]["shares"] -= 100
+    if portfolio[ticker]["shares"] <= 0:
+        del portfolio[ticker]
+
+    # Add strike price * 100 to cash (from stock sale)
+    global cash_balance
+    cash_balance += strike_price * 100
+
+    # Remove the covered call
+    del covered_calls[call_id]
+
+    save_covered_calls_data(covered_calls)
+    save_portfolio_data(portfolio)
+    save_cash_balance(cash_balance)
+    update_portfolio_display()
+
+    messagebox.showinfo(
+        "Stock Called Away",
+        f"{ticker} called away at ${strike_price:.2f} per share\n"
+        f"Received: ${strike_price * 100:.2f}",
+    )
 
 
 def remove_covered_call():
@@ -579,12 +784,12 @@ ttk.Label(control_frame, text="Date (YYYY-MM-DD):").grid(
 purchase_date_entry = ttk.Entry(control_frame, width=10)
 purchase_date_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=2)
 
-ttk.Button(control_frame, text="Add Stock", command=add_stock_to_portfolio).grid(
+ttk.Button(control_frame, text="Buy Stock", command=add_stock_to_portfolio).grid(
     row=5, column=0, pady=5
 )
-ttk.Button(
-    control_frame, text="Remove Stock", command=remove_stock_from_portfolio
-).grid(row=5, column=1, pady=5)
+ttk.Button(control_frame, text="Sell Stock", command=remove_stock_from_portfolio).grid(
+    row=5, column=1, pady=5
+)
 
 # Separator
 ttk.Separator(control_frame, orient="horizontal").grid(
@@ -625,27 +830,30 @@ ttk.Button(control_frame, text="Add Covered Call", command=add_covered_call).gri
 ttk.Button(control_frame, text="Remove Selected", command=remove_covered_call).grid(
     row=12, column=1, pady=5
 )
+ttk.Button(control_frame, text="Call Away (Exercise)", command=manual_call_away).grid(
+    row=13, column=0, columnspan=2, pady=5
+)
 
 # Separator
 ttk.Separator(control_frame, orient="horizontal").grid(
-    row=13, column=0, columnspan=2, sticky="ew", pady=10
+    row=14, column=0, columnspan=2, sticky="ew", pady=10
 )
 
 # Cash Management section
 cash_label = ttk.Label(
     control_frame, text="Cash Management", font=("Arial", 12, "bold")
 )
-cash_label.grid(row=14, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+cash_label.grid(row=15, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
 
-ttk.Label(control_frame, text="Amount:").grid(row=15, column=0, sticky=tk.W, pady=2)
+ttk.Label(control_frame, text="Amount:").grid(row=16, column=0, sticky=tk.W, pady=2)
 cash_entry = ttk.Entry(control_frame, width=10)
-cash_entry.grid(row=15, column=1, sticky=(tk.W, tk.E), pady=2)
+cash_entry.grid(row=16, column=1, sticky=(tk.W, tk.E), pady=2)
 
 ttk.Button(control_frame, text="Add Cash", command=add_cash).grid(
-    row=16, column=0, pady=5
+    row=17, column=0, pady=5
 )
 ttk.Button(control_frame, text="Remove Cash", command=remove_cash).grid(
-    row=16, column=1, pady=5
+    row=17, column=1, pady=5
 )
 
 # Configure control frame grid
@@ -666,8 +874,13 @@ stock_value_label.grid(row=1, column=0, sticky=tk.W)
 cash_value_label = ttk.Label(values_frame, text="Cash: $0.00")
 cash_value_label.grid(row=2, column=0, sticky=tk.W)
 
+contracted_value_label = ttk.Label(
+    values_frame, text="Stock Value (In Contracts): $0.00"
+)
+contracted_value_label.grid(row=3, column=0, sticky=tk.W)
+
 options_value_label = ttk.Label(values_frame, text="Options Value: $0.00")
-options_value_label.grid(row=3, column=0, sticky=tk.W)
+options_value_label.grid(row=4, column=0, sticky=tk.W)
 
 # Display section - Portfolio Holdings
 portfolio_frame = ttk.LabelFrame(display_frame, text="Portfolio Holdings", padding=10)
@@ -705,6 +918,9 @@ sv_ttk.set_theme("dark")
 portfolio = load_portfolio_data()
 covered_calls = load_covered_calls_data()
 cash_balance = load_cash_balance()
+
+# Check for expired options on startup
+check_expired_options()
 
 # Initial display update
 update_portfolio_display()
