@@ -246,6 +246,7 @@ def update_portfolio_display():
 def add_stock_to_portfolio():
     """
     Add a stock to the portfolio with purchase details.
+    Requires sufficient cash balance for the purchase.
     """
     try:
         ticker = ticker_entry.get().upper()
@@ -257,12 +258,30 @@ def add_stock_to_portfolio():
             messagebox.showerror("Error", "Please enter valid values")
             return
 
+        # Calculate total cost of purchase
+        total_cost = shares * purchase_price
+
+        # Check if we have sufficient cash
+        global cash_balance
+        if total_cost > cash_balance:
+            messagebox.showerror(
+                "Insufficient Funds",
+                f"Purchase cost: ${total_cost:.2f}\n"
+                f"Available cash: ${cash_balance:.2f}\n"
+                f"Need ${total_cost - cash_balance:.2f} more cash",
+            )
+            return
+
         # Validate date format
         try:
             datetime.strptime(purchase_date, "%Y-%m-%d")
         except ValueError:
             messagebox.showerror("Error", "Date must be in YYYY-MM-DD format")
             return
+
+        # Deduct cost from cash balance
+        cash_balance -= total_cost
+        save_cash_balance(cash_balance)
 
         if ticker in portfolio:
             # Update existing position (average cost)
@@ -290,13 +309,20 @@ def add_stock_to_portfolio():
         purchase_price_entry.delete(0, tk.END)
         purchase_date_entry.delete(0, tk.END)
 
+        messagebox.showinfo(
+            "Purchase Successful",
+            f"Purchased {shares} shares of {ticker} at ${purchase_price:.2f} each.\n"
+            f"Total cost: ${total_cost:.2f}\n"
+            f"Remaining cash: ${cash_balance:.2f}",
+        )
+
     except ValueError:
         messagebox.showerror("Error", "Please enter valid numeric values")
 
 
 def remove_stock_from_portfolio():
     """
-    Remove shares from the portfolio.
+    Remove shares from the portfolio and add proceeds to cash.
     """
     try:
         ticker = ticker_entry.get().upper()
@@ -306,6 +332,28 @@ def remove_stock_from_portfolio():
             messagebox.showerror("Error", f"{ticker} not found in portfolio")
             return
 
+        if shares_to_remove > portfolio[ticker]["shares"]:
+            messagebox.showerror(
+                "Error",
+                f"You only have {portfolio[ticker]['shares']} shares of {ticker}",
+            )
+            return
+
+        # Get current market price for the sale
+        current_price = get_current_stock_price(ticker)
+        if current_price == 0:
+            messagebox.showerror("Error", f"Could not get current price for {ticker}")
+            return
+
+        # Calculate proceeds from sale
+        sale_proceeds = shares_to_remove * current_price
+
+        # Add proceeds to cash balance
+        global cash_balance
+        cash_balance += sale_proceeds
+        save_cash_balance(cash_balance)
+
+        # Remove shares from portfolio
         if shares_to_remove >= portfolio[ticker]["shares"]:
             del portfolio[ticker]
         else:
@@ -317,6 +365,12 @@ def remove_stock_from_portfolio():
         # Clear entries
         ticker_entry.delete(0, tk.END)
         shares_entry.delete(0, tk.END)
+
+        messagebox.showinfo(
+            "Stock Sold",
+            f"Sold {shares_to_remove} shares of {ticker} at ${current_price:.2f} each.\n"
+            f"Proceeds: ${sale_proceeds:.2f} added to cash balance.",
+        )
 
     except ValueError:
         messagebox.showerror("Error", "Please enter valid numeric values")
