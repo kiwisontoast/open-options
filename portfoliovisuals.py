@@ -1002,12 +1002,12 @@ ttk.Label(control_frame, text="Date (YYYY-MM-DD):", font=("Arial", 8)).grid(
 purchase_date_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
 purchase_date_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=1)
 
-ttk.Button(control_frame, text="Add Stock", command=add_stock_to_portfolio).grid(
+ttk.Button(control_frame, text="Buy Stock", command=add_stock_to_portfolio).grid(
     row=5, column=0, pady=3
 )
-ttk.Button(
-    control_frame, text="Remove Stock", command=remove_stock_from_portfolio
-).grid(row=5, column=1, pady=3)
+ttk.Button(control_frame, text="Sell Stock", command=remove_stock_from_portfolio).grid(
+    row=5, column=1, pady=3
+)
 
 # Separator
 ttk.Separator(control_frame, orient="horizontal").grid(
