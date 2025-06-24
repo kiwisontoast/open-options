@@ -357,7 +357,7 @@ def check_dividend_payments():
 
         # Show summary of dividend payments
         message = "Dividend payments processed:\n\n" + "\n".join(dividend_payments)
-        messagebox.showinfo("Dividend Processing", message)
+        messagebox.showinfo("Dividend Processing", message, parent=root)
 
 
 def get_current_stock_price(ticker):
