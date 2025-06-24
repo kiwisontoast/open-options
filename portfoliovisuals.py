@@ -122,6 +122,54 @@ def save_cash_balance(cash):
         file.write(str(cash))
 
 
+def save_dividends_data(dividends):
+    """
+    Save dividends data to a file.
+    Format: ticker:ex_div_date:payment_date:dividend_per_share:status
+
+    Args:
+        dividends (dict): Dictionary containing dividends data
+    """
+    with open("dividends.txt", "w") as file:
+        for div_id, data in dividends.items():
+            ticker = data["ticker"]
+            ex_div_date = data["ex_div_date"]
+            payment_date = data["payment_date"]
+            dividend_per_share = data["dividend_per_share"]
+            status = data["status"]
+            file.write(
+                f"{ticker}:{ex_div_date}:{payment_date}:{dividend_per_share}:{status}\n"
+            )
+
+
+def load_dividends_data():
+    """
+    Load dividends data from a file.
+
+    Returns:
+        dict: Dictionary containing dividends data
+    """
+    dividends = {}
+    try:
+        with open("dividends.txt", "r") as file:
+            for i, line in enumerate(file.readlines()):
+                parts = line.strip().split(":")
+                if len(parts) == 5:
+                    ticker, ex_div_date, payment_date, dividend_per_share, status = (
+                        parts
+                    )
+                    dividends[f"div_{i}"] = {
+                        "ticker": ticker,
+                        "ex_div_date": ex_div_date,
+                        "payment_date": payment_date,
+                        "dividend_per_share": float(dividend_per_share),
+                        "status": status,
+                    }
+    except FileNotFoundError:
+        pass
+    return dividends
+
+
 def load_cash_balance():
     """
     Load cash balance from a file.
@@ -242,6 +290,76 @@ def check_expired_options():
         messagebox.showinfo("Options Expiry Processing", message)
 
 
+def check_dividend_payments():
+    """
+    Check for dividend payments that should be processed.
+    Called when the program starts.
+    """
+    current_date = datetime.now().date()
+    dividend_payments = []
+
+    for div_id, div_data in list(dividends.items()):
+        try:
+            ex_div_date = datetime.strptime(div_data["ex_div_date"], "%Y-%m-%d").date()
+            payment_date = datetime.strptime(
+                div_data["payment_date"], "%Y-%m-%d"
+            ).date()
+            ticker = div_data["ticker"]
+            dividend_per_share = div_data["dividend_per_share"]
+            status = div_data["status"]
+
+            # Check if payment date has arrived and dividend hasn't been paid yet
+            if current_date >= payment_date and status == "pending":
+                # Check if we owned shares on ex-dividend date
+                if ticker in portfolio:
+                    # Get purchase date to see if we owned shares on ex-div date
+                    purchase_date = datetime.strptime(
+                        portfolio[ticker]["purchase_date"], "%Y-%m-%d"
+                    ).date()
+
+                    # Must have purchased before ex-dividend date
+                    if purchase_date < ex_div_date:
+                        # Calculate dividend payment
+                        shares_owned = portfolio[ticker]["shares"]
+                        total_dividend = shares_owned * dividend_per_share
+
+                        # Add dividend to cash
+                        global cash_balance
+                        cash_balance += total_dividend
+
+                        # Mark dividend as paid
+                        dividends[div_id]["status"] = "paid"
+
+                        dividend_payments.append(
+                            f"{ticker}: ${total_dividend:.2f} dividend received ({shares_owned:.0f} shares × ${dividend_per_share:.2f})"
+                        )
+                    else:
+                        # Mark as ineligible
+                        dividends[div_id]["status"] = "ineligible"
+                        dividend_payments.append(
+                            f"{ticker}: Not eligible - purchased after ex-dividend date"
+                        )
+                else:
+                    # Mark as ineligible (no shares)
+                    dividends[div_id]["status"] = "ineligible"
+                    dividend_payments.append(
+                        f"{ticker}: Not eligible - no shares owned"
+                    )
+
+        except ValueError:
+            # Invalid date format, remove the dividend
+            dividend_payments.append(f"Invalid dividend removed: {div_data}")
+            del dividends[div_id]
+
+    if dividend_payments:
+        save_dividends_data(dividends)
+        save_cash_balance(cash_balance)
+
+        # Show summary of dividend payments
+        message = "Dividend payments processed:\n\n" + "\n".join(dividend_payments)
+        messagebox.showinfo("Dividend Processing", message)
+
+
 def get_current_stock_price(ticker):
     """
     Get current stock price for a ticker.
@@ -306,7 +424,7 @@ def calculate_portfolio_value():
         # In a real application, you'd fetch current option prices
         options_value += call_data["premium"] * 100
 
-    total_value = stock_value + cash_balance + options_value
+    total_value = stock_value + cash_balance
 
     return (
         total_value,
@@ -386,6 +504,32 @@ def update_portfolio_display():
             f"{call_data['ticker']} | Strike: ${call_data['strike_price']:.2f} | "
             f"Premium: ${call_data['premium']:.2f} | Days: {days_remaining} | "
             f"Exp: {call_data['exp_date']}",
+        )
+
+    # Update dividends listbox
+    dividends_listbox.delete(0, tk.END)
+    for div_id, div_data in dividends.items():
+        # Calculate days to payment
+        try:
+            payment_date = datetime.strptime(div_data["payment_date"], "%Y-%m-%d")
+            days_to_payment = (payment_date - datetime.now()).days
+        except:
+            days_to_payment = 0
+
+        # Color code by status
+        status_text = div_data["status"].upper()
+        if div_data["status"] == "paid":
+            status_color = "✓"
+        elif div_data["status"] == "pending":
+            status_color = "⏳"
+        else:
+            status_color = "✗"
+
+        dividends_listbox.insert(
+            tk.END,
+            f"{div_data['ticker']} | ${div_data['dividend_per_share']:.2f}/share | "
+            f"Ex: {div_data['ex_div_date']} | Pay: {div_data['payment_date']} | "
+            f"Days: {days_to_payment} | {status_color} {status_text}",
         )
 
 
@@ -660,6 +804,78 @@ def remove_covered_call():
     update_portfolio_display()
 
 
+def add_dividend():
+    """
+    Add a dividend tracking entry.
+    """
+    try:
+        ticker = div_ticker_entry.get().upper()
+        ex_div_date = div_ex_date_entry.get()
+        payment_date = div_payment_date_entry.get()
+        dividend_per_share = float(div_amount_entry.get())
+
+        if not ticker or dividend_per_share <= 0:
+            messagebox.showerror("Error", "Please enter valid values")
+            return
+
+        # Validate date formats
+        try:
+            datetime.strptime(ex_div_date, "%Y-%m-%d")
+            datetime.strptime(payment_date, "%Y-%m-%d")
+        except ValueError:
+            messagebox.showerror("Error", "Dates must be in YYYY-MM-DD format")
+            return
+
+        # Check that payment date is after ex-dividend date
+        ex_date_obj = datetime.strptime(ex_div_date, "%Y-%m-%d")
+        pay_date_obj = datetime.strptime(payment_date, "%Y-%m-%d")
+
+        if pay_date_obj <= ex_date_obj:
+            messagebox.showerror("Error", "Payment date must be after ex-dividend date")
+            return
+
+        # Create dividend entry
+        div_id = f"div_{len(dividends)}"
+        dividends[div_id] = {
+            "ticker": ticker,
+            "ex_div_date": ex_div_date,
+            "payment_date": payment_date,
+            "dividend_per_share": dividend_per_share,
+            "status": "pending",
+        }
+
+        save_dividends_data(dividends)
+        update_portfolio_display()
+
+        # Clear entries
+        div_ticker_entry.delete(0, tk.END)
+        div_ex_date_entry.delete(0, tk.END)
+        div_payment_date_entry.delete(0, tk.END)
+        div_amount_entry.delete(0, tk.END)
+
+        messagebox.showinfo("Success", f"Dividend tracking added for {ticker}")
+
+    except ValueError:
+        messagebox.showerror("Error", "Please enter valid numeric values")
+
+
+def remove_dividend():
+    """
+    Remove a selected dividend entry.
+    """
+    selection = dividends_listbox.curselection()
+    if not selection:
+        messagebox.showerror("Error", "Please select a dividend to remove")
+        return
+
+    index = selection[0]
+    div_id = list(dividends.keys())[index]
+    del dividends[div_id]
+
+    save_dividends_data(dividends)
+    update_portfolio_display()
+
+
 def add_cash():
     """
     Add cash to the account.
@@ -758,137 +974,187 @@ display_frame.grid_columnconfigure(0, weight=1)
 
 # Portfolio section
 portfolio_label = ttk.Label(
-    control_frame, text="Portfolio Management", font=("Arial", 12, "bold")
+    control_frame, text="Portfolio Management", font=("Arial", 10, "bold")
 )
-portfolio_label.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+portfolio_label.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
 
-ttk.Label(control_frame, text="Stock Ticker:").grid(
-    row=1, column=0, sticky=tk.W, pady=2
+ttk.Label(control_frame, text="Stock Ticker:", font=("Arial", 8)).grid(
+    row=1, column=0, sticky=tk.W, pady=1
 )
-ticker_entry = ttk.Entry(control_frame, width=10)
-ticker_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=2)
+ticker_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+ticker_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=1)
 
-ttk.Label(control_frame, text="Shares:").grid(row=2, column=0, sticky=tk.W, pady=2)
-shares_entry = ttk.Entry(control_frame, width=10)
-shares_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=2)
+ttk.Label(control_frame, text="Shares:", font=("Arial", 8)).grid(
+    row=2, column=0, sticky=tk.W, pady=1
+)
+shares_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+shares_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=1)
 
-ttk.Label(control_frame, text="Purchase Price:").grid(
-    row=3, column=0, sticky=tk.W, pady=2
+ttk.Label(control_frame, text="Purchase Price:", font=("Arial", 8)).grid(
+    row=3, column=0, sticky=tk.W, pady=1
 )
-purchase_price_entry = ttk.Entry(control_frame, width=10)
-purchase_price_entry.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=2)
+purchase_price_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+purchase_price_entry.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=1)
 
-ttk.Label(control_frame, text="Date (YYYY-MM-DD):").grid(
-    row=4, column=0, sticky=tk.W, pady=2
+ttk.Label(control_frame, text="Date (YYYY-MM-DD):", font=("Arial", 8)).grid(
+    row=4, column=0, sticky=tk.W, pady=1
 )
-purchase_date_entry = ttk.Entry(control_frame, width=10)
-purchase_date_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=2)
+purchase_date_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+purchase_date_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=1)
 
-ttk.Button(control_frame, text="Buy Stock", command=add_stock_to_portfolio).grid(
-    row=5, column=0, pady=5
+ttk.Button(control_frame, text="Add Stock", command=add_stock_to_portfolio).grid(
+    row=5, column=0, pady=3
 )
-ttk.Button(control_frame, text="Sell Stock", command=remove_stock_from_portfolio).grid(
-    row=5, column=1, pady=5
-)
+ttk.Button(
+    control_frame, text="Remove Stock", command=remove_stock_from_portfolio
+).grid(row=5, column=1, pady=3)
 
 # Separator
 ttk.Separator(control_frame, orient="horizontal").grid(
-    row=6, column=0, columnspan=2, sticky="ew", pady=10
+    row=6, column=0, columnspan=2, sticky="ew", pady=5
 )
 
 # Covered Calls section
-cc_label = ttk.Label(control_frame, text="Covered Calls", font=("Arial", 12, "bold"))
-cc_label.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+cc_label = ttk.Label(control_frame, text="Covered Calls", font=("Arial", 10, "bold"))
+cc_label.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
 
-ttk.Label(control_frame, text="Stock Ticker:").grid(
-    row=8, column=0, sticky=tk.W, pady=2
+ttk.Label(control_frame, text="Stock Ticker:", font=("Arial", 8)).grid(
+    row=8, column=0, sticky=tk.W, pady=1
 )
-cc_ticker_entry = ttk.Entry(control_frame, width=10)
-cc_ticker_entry.grid(row=8, column=1, sticky=(tk.W, tk.E), pady=2)
+cc_ticker_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+cc_ticker_entry.grid(row=8, column=1, sticky=(tk.W, tk.E), pady=1)
 
-ttk.Label(control_frame, text="Exp Date (YYYY-MM-DD):").grid(
-    row=9, column=0, sticky=tk.W, pady=2
+ttk.Label(control_frame, text="Exp Date (YYYY-MM-DD):", font=("Arial", 8)).grid(
+    row=9, column=0, sticky=tk.W, pady=1
 )
-cc_exp_date_entry = ttk.Entry(control_frame, width=10)
-cc_exp_date_entry.grid(row=9, column=1, sticky=(tk.W, tk.E), pady=2)
+cc_exp_date_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+cc_exp_date_entry.grid(row=9, column=1, sticky=(tk.W, tk.E), pady=1)
 
-ttk.Label(control_frame, text="Strike Price:").grid(
-    row=10, column=0, sticky=tk.W, pady=2
+ttk.Label(control_frame, text="Strike Price:", font=("Arial", 8)).grid(
+    row=10, column=0, sticky=tk.W, pady=1
 )
-cc_strike_entry = ttk.Entry(control_frame, width=10)
-cc_strike_entry.grid(row=10, column=1, sticky=(tk.W, tk.E), pady=2)
+cc_strike_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+cc_strike_entry.grid(row=10, column=1, sticky=(tk.W, tk.E), pady=1)
 
-ttk.Label(control_frame, text="Premium per Share:").grid(
-    row=11, column=0, sticky=tk.W, pady=2
+ttk.Label(control_frame, text="Premium per Share:", font=("Arial", 8)).grid(
+    row=11, column=0, sticky=tk.W, pady=1
 )
-cc_premium_entry = ttk.Entry(control_frame, width=10)
-cc_premium_entry.grid(row=11, column=1, sticky=(tk.W, tk.E), pady=2)
+cc_premium_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+cc_premium_entry.grid(row=11, column=1, sticky=(tk.W, tk.E), pady=1)
 
 ttk.Button(control_frame, text="Add Covered Call", command=add_covered_call).grid(
-    row=12, column=0, pady=5
+    row=12, column=0, pady=3
 )
 ttk.Button(control_frame, text="Remove Selected", command=remove_covered_call).grid(
-    row=12, column=1, pady=5
+    row=12, column=1, pady=3
 )
 ttk.Button(control_frame, text="Call Away (Exercise)", command=manual_call_away).grid(
-    row=13, column=0, columnspan=2, pady=5
+    row=13, column=0, columnspan=2, pady=3
 )
 
 # Separator
 ttk.Separator(control_frame, orient="horizontal").grid(
-    row=14, column=0, columnspan=2, sticky="ew", pady=10
+    row=14, column=0, columnspan=2, sticky="ew", pady=5
+)
+
+# Dividends section
+div_label = ttk.Label(
+    control_frame, text="Dividend Tracking", font=("Arial", 10, "bold")
+)
+div_label.grid(row=15, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
+
+ttk.Label(control_frame, text="Stock Ticker:", font=("Arial", 8)).grid(
+    row=16, column=0, sticky=tk.W, pady=1
+)
+div_ticker_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+div_ticker_entry.grid(row=16, column=1, sticky=(tk.W, tk.E), pady=1)
+
+ttk.Label(control_frame, text="Ex-Div Date (YYYY-MM-DD):", font=("Arial", 8)).grid(
+    row=17, column=0, sticky=tk.W, pady=1
+)
+div_ex_date_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+div_ex_date_entry.grid(row=17, column=1, sticky=(tk.W, tk.E), pady=1)
+
+ttk.Label(control_frame, text="Payment Date (YYYY-MM-DD):", font=("Arial", 8)).grid(
+    row=18, column=0, sticky=tk.W, pady=1
+)
+div_payment_date_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+div_payment_date_entry.grid(row=18, column=1, sticky=(tk.W, tk.E), pady=1)
+
+ttk.Label(control_frame, text="Dividend per Share:", font=("Arial", 8)).grid(
+    row=19, column=0, sticky=tk.W, pady=1
+)
+div_amount_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+div_amount_entry.grid(row=19, column=1, sticky=(tk.W, tk.E), pady=1)
+
+ttk.Button(control_frame, text="Add Dividend", command=add_dividend).grid(
+    row=20, column=0, pady=3
+)
+ttk.Button(control_frame, text="Remove Selected", command=remove_dividend).grid(
+    row=20, column=1, pady=3
+)
+
+# Separator
+ttk.Separator(control_frame, orient="horizontal").grid(
+    row=21, column=0, columnspan=2, sticky="ew", pady=5
 )
 
 # Cash Management section
 cash_label = ttk.Label(
-    control_frame, text="Cash Management", font=("Arial", 12, "bold")
+    control_frame, text="Cash Management", font=("Arial", 10, "bold")
 )
-cash_label.grid(row=15, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+cash_label.grid(row=22, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
 
-ttk.Label(control_frame, text="Amount:").grid(row=16, column=0, sticky=tk.W, pady=2)
-cash_entry = ttk.Entry(control_frame, width=10)
-cash_entry.grid(row=16, column=1, sticky=(tk.W, tk.E), pady=2)
+ttk.Label(control_frame, text="Amount:", font=("Arial", 8)).grid(
+    row=23, column=0, sticky=tk.W, pady=1
+)
+cash_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
+cash_entry.grid(row=23, column=1, sticky=(tk.W, tk.E), pady=1)
 
 ttk.Button(control_frame, text="Add Cash", command=add_cash).grid(
-    row=17, column=0, pady=5
+    row=24, column=0, pady=3
 )
 ttk.Button(control_frame, text="Remove Cash", command=remove_cash).grid(
-    row=17, column=1, pady=5
+    row=24, column=1, pady=3
 )
 
 # Configure control frame grid
 control_frame.grid_columnconfigure(1, weight=1)
 
 # Display section - Portfolio Values
-values_frame = ttk.LabelFrame(display_frame, text="Portfolio Summary", padding=10)
-values_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+values_frame = ttk.LabelFrame(display_frame, text="Portfolio Summary", padding=5)
+values_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
 
 total_value_label = ttk.Label(
-    values_frame, text="Total Portfolio Value: $0.00", font=("Arial", 12, "bold")
+    values_frame, text="Total Portfolio Value: $0.00", font=("Arial", 10, "bold")
 )
 total_value_label.grid(row=0, column=0, sticky=tk.W)
 
-stock_value_label = ttk.Label(values_frame, text="Stock Value: $0.00")
+stock_value_label = ttk.Label(
+    values_frame, text="Stock Value: $0.00", font=("Arial", 9)
+)
 stock_value_label.grid(row=1, column=0, sticky=tk.W)
 
-cash_value_label = ttk.Label(values_frame, text="Cash: $0.00")
+cash_value_label = ttk.Label(values_frame, text="Cash: $0.00", font=("Arial", 9))
 cash_value_label.grid(row=2, column=0, sticky=tk.W)
 
 contracted_value_label = ttk.Label(
-    values_frame, text="Stock Value (In Contracts): $0.00"
+    values_frame, text="Stock Value (In Contracts): $0.00", font=("Arial", 9)
 )
 contracted_value_label.grid(row=3, column=0, sticky=tk.W)
 
-options_value_label = ttk.Label(values_frame, text="Options Value: $0.00")
+options_value_label = ttk.Label(
+    values_frame, text="Options Value: $0.00", font=("Arial", 9)
+)
 options_value_label.grid(row=4, column=0, sticky=tk.W)
 
 # Display section - Portfolio Holdings
-portfolio_frame = ttk.LabelFrame(display_frame, text="Portfolio Holdings", padding=10)
-portfolio_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+portfolio_frame = ttk.LabelFrame(display_frame, text="Portfolio Holdings", padding=5)
+portfolio_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 5))
 portfolio_frame.grid_rowconfigure(0, weight=1)
 portfolio_frame.grid_columnconfigure(0, weight=1)
 
-portfolio_listbox = tk.Listbox(portfolio_frame, font=("Courier", 10))
+portfolio_listbox = tk.Listbox(portfolio_frame, font=("Courier", 8))
 portfolio_listbox.grid(row=0, column=0, sticky="nsew")
 
 portfolio_scrollbar = ttk.Scrollbar(
@@ -898,10 +1164,10 @@ portfolio_scrollbar.grid(row=0, column=1, sticky="ns")
 portfolio_listbox.configure(yscrollcommand=portfolio_scrollbar.set)
 
 # Display section - Covered Calls
-calls_frame = ttk.LabelFrame(display_frame, text="Covered Calls", padding=10)
-calls_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+calls_frame = ttk.LabelFrame(display_frame, text="Covered Calls", padding=5)
+calls_frame.grid(row=2, column=0, sticky="ew", pady=(0, 5))
 
-covered_calls_listbox = tk.Listbox(calls_frame, font=("Courier", 10), height=6)
+covered_calls_listbox = tk.Listbox(calls_frame, font=("Courier", 8), height=4)
 covered_calls_listbox.grid(row=0, column=0, sticky="ew")
 
 calls_scrollbar = ttk.Scrollbar(
@@ -911,16 +1177,32 @@ calls_scrollbar.grid(row=0, column=1, sticky="ns")
 covered_calls_listbox.configure(yscrollcommand=calls_scrollbar.set)
 calls_frame.grid_columnconfigure(0, weight=1)
 
+# Display section - Dividends
+dividends_frame = ttk.LabelFrame(display_frame, text="Dividend Tracking", padding=5)
+dividends_frame.grid(row=3, column=0, sticky="ew", pady=(0, 5))
+
+dividends_listbox = tk.Listbox(dividends_frame, font=("Courier", 8), height=4)
+dividends_listbox.grid(row=0, column=0, sticky="ew")
+
+dividends_scrollbar = ttk.Scrollbar(
+    dividends_frame, orient="vertical", command=dividends_listbox.yview
+)
+dividends_scrollbar.grid(row=0, column=1, sticky="ns")
+dividends_listbox.configure(yscrollcommand=dividends_scrollbar.set)
+dividends_frame.grid_columnconfigure(0, weight=1)
+
 # Set theme
 sv_ttk.set_theme("dark")
 
 # Load data
 portfolio = load_portfolio_data()
 covered_calls = load_covered_calls_data()
+dividends = load_dividends_data()
 cash_balance = load_cash_balance()
 
-# Check for expired options on startup
+# Check for expired options and dividend payments on startup
 check_expired_options()
+check_dividend_payments()
 
 # Initial display update
 update_portfolio_display()
