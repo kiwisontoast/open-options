@@ -357,7 +357,7 @@ def check_dividend_payments():
 
         # Show summary of dividend payments
         message = "Dividend payments processed:\n\n" + "\n".join(dividend_payments)
-        messagebox.showinfo("Dividend Processing", message, parent=root)
+        messagebox.showinfo("Dividend Processing", message)
 
 
 def get_current_stock_price(ticker):
@@ -375,6 +375,160 @@ def get_current_stock_price(ticker):
         return data["Close"].iloc[-1]
     except:
         return 0.0
+
+
+def fetch_upcoming_dividends():
+    """
+    Automatically fetch upcoming dividends for stocks in portfolio using yfinance.
+    Called when the program starts.
+    """
+    new_dividends_found = []
+
+    for ticker in portfolio.keys():
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+
+            # Get dividend information
+            ex_div_date = info.get("exDividendDate")
+            dividend_rate = info.get("dividendRate")  # Annual dividend rate
+            dividend_yield = info.get("dividendYield")
+
+            # If we have ex-dividend date and annual rate, calculate quarterly dividend
+            if ex_div_date and dividend_rate:
+                # Convert timestamp to date if needed
+                if isinstance(ex_div_date, (int, float)):
+                    ex_div_date = datetime.fromtimestamp(ex_div_date).date()
+                elif isinstance(ex_div_date, str):
+                    ex_div_date = datetime.strptime(ex_div_date, "%Y-%m-%d").date()
+
+                # Calculate quarterly dividend (most common)
+                quarterly_dividend = dividend_rate / 4
+
+                # Estimate payment date (typically 2-3 weeks after ex-div date)
+                payment_date = ex_div_date + timedelta(days=21)
+
+                # Check if this dividend is already tracked
+                already_tracked = False
+                for div_data in dividends.values():
+                    if div_data["ticker"] == ticker and div_data[
+                        "ex_div_date"
+                    ] == ex_div_date.strftime("%Y-%m-%d"):
+                        already_tracked = True
+                        break
+
+                # Add new dividend if not already tracked
+                if not already_tracked and ex_div_date >= datetime.now().date():
+                    div_id = f"div_{len(dividends)}"
+                    dividends[div_id] = {
+                        "ticker": ticker,
+                        "ex_div_date": ex_div_date.strftime("%Y-%m-%d"),
+                        "payment_date": payment_date.strftime("%Y-%m-%d"),
+                        "dividend_per_share": quarterly_dividend,
+                        "status": "pending",
+                    }
+                    new_dividends_found.append(
+                        f"{ticker}: ${quarterly_dividend:.2f} on {ex_div_date}"
+                    )
+
+        except Exception as e:
+            # Skip stocks that can't be fetched
+            continue
+
+    # Save new dividends if any were found
+    if new_dividends_found:
+        save_dividends_data(dividends)
+        message = "New dividends detected:\n\n" + "\n".join(new_dividends_found)
+        messagebox.showinfo("Automatic Dividend Detection", message, parent=root)
+
+
+def check_historical_dividends():
+    """
+    Check for historical dividends that may have been missed while program was closed.
+    This runs on startup to catch any dividends that occurred while the program wasn't running.
+    """
+    historical_payments = []
+    current_date = datetime.now().date()
+
+    for ticker in portfolio.keys():
+        try:
+            stock = yf.Ticker(ticker)
+            # Get dividend history for the last 6 months
+            start_date = current_date - timedelta(days=180)
+            dividends_history = stock.dividends
+
+            if not dividends_history.empty:
+                # Filter to recent dividends
+                recent_dividends = dividends_history[
+                    dividends_history.index.date >= start_date
+                ]
+
+                for div_date, div_amount in recent_dividends.items():
+                    div_date = div_date.date()
+
+                    # Check if we owned the stock before this dividend
+                    purchase_date = datetime.strptime(
+                        portfolio[ticker]["purchase_date"], "%Y-%m-%d"
+                    ).date()
+
+                    # If we owned the stock before the dividend date and it's in the past
+                    if purchase_date < div_date and div_date <= current_date:
+
+                        # Check if this dividend is already tracked
+                        already_tracked = False
+                        for div_data in dividends.values():
+                            if (
+                                div_data["ticker"] == ticker
+                                and abs(
+                                    (
+                                        datetime.strptime(
+                                            div_data["ex_div_date"], "%Y-%m-%d"
+                                        ).date()
+                                        - div_date
+                                    ).days
+                                )
+                                <= 5
+                            ):
+                                already_tracked = True
+                                break
+
+                        # If not tracked, add it as a completed dividend
+                        if not already_tracked:
+                            # Estimate ex-dividend date (usually a few days before payment)
+                            ex_div_date = div_date - timedelta(days=3)
+
+                            # Calculate total dividend payment
+                            shares_owned = portfolio[ticker]["shares"]
+                            total_dividend = shares_owned * div_amount
+
+                            # Add to cash balance
+                            global cash_balance
+                            cash_balance += total_dividend
+
+                            # Add to dividend tracking as "paid"
+                            div_id = f"div_{len(dividends)}"
+                            dividends[div_id] = {
+                                "ticker": ticker,
+                                "ex_div_date": ex_div_date.strftime("%Y-%m-%d"),
+                                "payment_date": div_date.strftime("%Y-%m-%d"),
+                                "dividend_per_share": float(div_amount),
+                                "status": "paid",
+                            }
+
+                            historical_payments.append(
+                                f"{ticker}: ${total_dividend:.2f} dividend credited ({shares_owned:.0f} shares × ${div_amount:.2f})"
+                            )
+
+        except Exception as e:
+            # Skip stocks that can't be fetched
+            continue
+
+    # Save changes if any historical dividends were found
+    if historical_payments:
+        save_dividends_data(dividends)
+        save_cash_balance(cash_balance)
+        message = "Historical dividends credited:\n\n" + "\n".join(historical_payments)
+        messagebox.showinfo("Historical Dividend Processing", message, parent=root)
 
 
 def calculate_portfolio_value():
@@ -1002,12 +1156,12 @@ ttk.Label(control_frame, text="Date (YYYY-MM-DD):", font=("Arial", 8)).grid(
 purchase_date_entry = ttk.Entry(control_frame, width=8, font=("Arial", 8))
 purchase_date_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=1)
 
-ttk.Button(control_frame, text="Buy Stock", command=add_stock_to_portfolio).grid(
+ttk.Button(control_frame, text="Add Stock", command=add_stock_to_portfolio).grid(
     row=5, column=0, pady=3
 )
-ttk.Button(control_frame, text="Sell Stock", command=remove_stock_from_portfolio).grid(
-    row=5, column=1, pady=3
-)
+ttk.Button(
+    control_frame, text="Remove Stock", command=remove_stock_from_portfolio
+).grid(row=5, column=1, pady=3)
 
 # Separator
 ttk.Separator(control_frame, orient="horizontal").grid(
@@ -1200,8 +1354,10 @@ covered_calls = load_covered_calls_data()
 dividends = load_dividends_data()
 cash_balance = load_cash_balance()
 
-# Check for expired options and dividend payments on startup
+# Check for expired options, historical dividends, upcoming dividends, and current dividend payments on startup
 check_expired_options()
+check_historical_dividends()
+fetch_upcoming_dividends()
 check_dividend_payments()
 
 # Initial display update
